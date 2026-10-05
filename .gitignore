@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+logs/
+*.log
+.env
+.env.*
+!.env.example
+web/.env
+web/.env.*
+!web/.env.example
+.DS_Store
+.vscode/
+.idea/
+supabase/.temp/
+
+work/

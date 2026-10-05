@@ -1,0 +1,156 @@
+# JobFinder v2 · PRUEBA MANUAL (workflow_dispatch). Todavía sin cron.
+#
+#   1. collect  APIs oficiales/gratuitas → relevancia → filtros duros por código → work/
+#   2. claude   claude-code-action con tu SUSCRIPCIÓN (CLAUDE_CODE_OAUTH_TOKEN) → JSON estructurado
+#   3. store    valida el JSON, re-aplica filtros por código y guarda en Supabase
+#               (si Claude falla o se agota la cuota, guarda con puntuación solo por código)
+#
+# Coste: 0 €. No se usa ANTHROPIC_API_KEY en ningún paso y el workflow se
+# detiene si detecta credenciales de la API de Anthropic.
+name: Búsqueda v2 (prueba manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Repetir aunque la búsqueda de hoy ya se haya hecho"
+        type: boolean
+        default: false
+      skip_claude:
+        description: "Probar SIN Claude (todo con puntuación por código)"
+        type: boolean
+        default: false
+      max_claude:
+        description: "Máximo de ofertas a analizar con Claude (0-100)"
+        type: string
+        default: "30"
+
+# Comparte grupo con la v1: nunca dos búsquedas a la vez.
+concurrency:
+  group: daily-job-search
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Instalar dependencias
+        working-directory: worker
+        run: npm ci
+
+      # ------------------------------------------------------------------
+      # Protección contra cargos de API: este workflow solo puede usar la
+      # suscripción. Si existe el secret ANTHROPIC_API_KEY o alguna variable
+      # de credenciales de API en el entorno, se detiene.
+      # ------------------------------------------------------------------
+      - name: Comprobar que no hay credenciales de la API de Anthropic
+        env:
+          API_KEY_SECRET_EXISTS: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+            echo "::error::Hay credenciales de la API de Anthropic en el entorno. La v2 no debe usarlas."
+            exit 1
+          fi
+          if [ "$API_KEY_SECRET_EXISTS" = "true" ]; then
+            echo "::error::Existe el secret ANTHROPIC_API_KEY en el repositorio. La v2 no lo usa, pero para que no exista ninguna ruta de facturación por API, bórralo (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          echo "OK: no hay credenciales de API de Anthropic."
+
+      - name: "1 · Recoger ofertas (APIs oficiales + filtros por código)"
+        id: collect
+        working-directory: worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          JOBFINDER_USER_ID: ${{ secrets.JOBFINDER_USER_ID }}
+          INFOJOBS_CLIENT_ID: ${{ secrets.INFOJOBS_CLIENT_ID }}
+          INFOJOBS_CLIENT_SECRET: ${{ secrets.INFOJOBS_CLIENT_SECRET }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          MAX_CLAUDE_CANDIDATES: ${{ inputs.max_claude }}
+          WORK_DIR: ${{ github.workspace }}/work
+          FORCE_RUN: ${{ inputs.force && 'true' || 'false' }}
+        run: npm run v2:collect
+
+      - name: Decidir si se ejecuta Claude
+        id: gate
+        if: steps.collect.outputs.run_started == 'true'
+        env:
+          HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          SKIP: ${{ inputs.skip_claude }}
+          CANDIDATES: ${{ steps.collect.outputs.claude_candidates }}
+        run: |
+          reason=""
+          if [ "${CANDIDATES:-0}" = "0" ]; then reason="no_candidates"
+          elif [ "$SKIP" = "true" ]; then reason="by_input"
+          elif [ "$HAS_TOKEN" != "true" ]; then reason="no_token"
+          fi
+          echo "skip_reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Candidatos para Claude: ${CANDIDATES:-0} · omitir: ${reason:-no}"
+
+      # ------------------------------------------------------------------
+      # Paso de Claude. Solo recibe el token de SUSCRIPCIÓN; no tiene acceso a
+      # Supabase ni a otras credenciales. Solo puede leer archivos (Read);
+      # no tiene shell, ni escritura, ni navegación web.
+      # continue-on-error: si falla o se agota la cuota, el paso 3 guarda las
+      # ofertas con la puntuación por código.
+      # ------------------------------------------------------------------
+      - name: "2 · Análisis con Claude (suscripción, claude-code-action)"
+        id: claude
+        if: steps.collect.outputs.run_started == 'true' && steps.gate.outputs.skip_reason == ''
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1.0.241
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          prompt: |
+            Lee work/instructions.md y sigue sus instrucciones al pie de la letra.
+            Después lee todos los archivos de work/candidates/ y devuelve el resultado únicamente
+            mediante la salida estructurada: un análisis por candidato, con su id.
+            No uses ninguna herramienta aparte de Read.
+          claude_args: |
+            --max-turns 30
+            --allowedTools Read
+            --disallowedTools Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch Task Agent
+            --json-schema '${{ steps.collect.outputs.json_schema }}'
+            ${{ vars.CLAUDE_MODEL != '' && format('--model {0}', vars.CLAUDE_MODEL) || '' }}
+
+      - name: "3 · Validar y guardar en Supabase"
+        if: always() && steps.collect.outputs.run_started == 'true'
+        working-directory: worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          JOBFINDER_USER_ID: ${{ secrets.JOBFINDER_USER_ID }}
+          WORK_DIR: ${{ github.workspace }}/work
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CLAUDE_SKIPPED_REASON: ${{ steps.gate.outputs.skip_reason }}
+        run: npm run v2:store
+
+      - name: Guardar métricas y logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jobfinder-v2-${{ github.run_id }}
+          path: |
+            worker/logs/
+            work/metrics.json
+            work/state.json
+            work/instructions.md
+            work/candidates/
+          retention-days: 14
+          if-no-files-found: ignore

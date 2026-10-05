@@ -1,0 +1,18 @@
+{
+  "name": "jobfinder",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Búsqueda y filtrado automático diario de ofertas de empleo IT (busca → analiza → filtra → guarda → muestra).",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "install:all": "npm ci --prefix worker && npm ci --prefix web",
+    "search": "npm run search --prefix worker",
+    "search:dry": "npm run search:dry --prefix worker",
+    "test": "npm test --prefix worker && npm test --prefix web",
+    "typecheck": "npm run typecheck --prefix worker && npm run typecheck --prefix web",
+    "dev": "npm run dev --prefix web",
+    "build": "npm run build --prefix web"
+  }
+}

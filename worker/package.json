@@ -1,0 +1,32 @@
+{
+  "name": "@jobfinder/worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "search": "node --env-file-if-exists=.env.local --import tsx src/index.ts",
+    "search:dry": "node --env-file-if-exists=.env.local --import tsx src/index.ts --dry-run",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "v2:collect": "node --env-file-if-exists=.env.local --import tsx src/v2/cli.ts collect",
+    "v2:store": "node --env-file-if-exists=.env.local --import tsx src/v2/cli.ts store",
+    "v2:schema": "tsx src/v2/cli.ts schema"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "@supabase/supabase-js": "^2.117.2",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^22.0.0",
+    "@types/shell-quote": "^1.7.5",
+    "shell-quote": "^1.12.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22.9"
+  }
+}
